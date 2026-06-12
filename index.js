@@ -157,9 +157,10 @@ async function runScrape(niche, city, limit, scanId, mode) {
   const query = `${niche} in ${city}`;
   const leads = [];
   let browser;
+  let page;
   let totalScanned = 0;
 
-  try {
+  async function launchBrowser() {
     browser = await puppeteer.launch({
       headless: 'new',
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -174,10 +175,13 @@ async function runScrape(niche, city, limit, scanId, mode) {
         '--memory-pressure-off'
       ]
     });
-
-    const page = await browser.newPage();
+    page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
+  }
+
+  try {
+    await launchBrowser();
 
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -226,6 +230,13 @@ async function runScrape(niche, city, limit, scanId, mode) {
     for (let i = 0; i < listingLinks.length; i++) {
       const link = listingLinks[i];
       if (leads.length >= limit) break;
+
+      // Restart browser every 10 listings to free memory
+      if (i > 0 && i % 10 === 0) {
+        console.log(`Restarting browser at listing ${i} to free memory...`);
+        await browser.close().catch(() => {});
+        await launchBrowser();
+      }
 
       const bizId = link.split('/maps/place/')[1]?.split('/')[0] || link;
 
