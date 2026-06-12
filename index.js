@@ -14,7 +14,6 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/scrape', async (req, res) => {
   const { niche, city, limit = 10 } = req.body;
-
   if (!niche || !city) {
     return res.status(400).json({ error: 'niche and city are required' });
   }
@@ -26,7 +25,16 @@ app.post('/api/scrape', async (req, res) => {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+      ],
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
     });
 
     const context = await browser.newContext({
@@ -35,30 +43,36 @@ app.post('/api/scrape', async (req, res) => {
     });
 
     const page = await context.newPage();
+    page.setDefaultTimeout(30000);
 
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(3000);
 
-    await page.waitForSelector('[role="feed"]', { timeout: 15000 }).catch(() => {});
+    // Accept cookies if prompted
+    await page.click('button[aria-label*="Accept"]').catch(() => {});
+    await page.waitForTimeout(1000);
 
-    const feed = await page.$('[role="feed"]');
-    if (feed) {
-      for (let i = 0; i < 5; i++) {
-        await feed.evaluate((el) => el.scrollBy(0, 800));
-        await page.waitForTimeout(1200);
-      }
+    // Scroll results to load more
+    for (let i = 0; i < 4; i++) {
+      await page.evaluate(() => {
+        const feed = document.querySelector('[role="feed"]');
+        if (feed) feed.scrollBy(0, 1000);
+      });
+      await page.waitForTimeout(1500);
     }
 
+    // Collect listing URLs
     const listingLinks = await page.$$eval(
       'a[href*="/maps/place/"]',
-      (anchors) =>
-        [
-          ...new Map(
-            anchors
-              .filter((a) => a.href.includes('/maps/place/'))
-              .map((a) => [a.href.split('?')[0], a.href])
-          ).values(),
-        ].slice(0, 40)
+      (anchors) => [
+        ...new Map(
+          anchors
+            .filter((a) => a.href.includes('/maps/place/'))
+            .map((a) => [a.href.split('?')[0], a.href])
+        ).values(),
+      ].slice(0, 35)
     );
 
     console.log(`Found ${listingLinks.length} listings for "${query}"`);
@@ -71,17 +85,16 @@ app.post('/api/scrape', async (req, res) => {
 
       try {
         const detailPage = await context.newPage();
-        await detailPage.goto(link, { waitUntil: 'networkidle', timeout: 20000 });
-        await detailPage.waitForTimeout(1500);
+        await detailPage.goto(link, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await detailPage.waitForTimeout(2000);
 
         const hasWebsite = await detailPage.evaluate(() => {
-          const websiteBtn = Array.from(document.querySelectorAll('a')).find(
-            (a) =>
-              a.getAttribute('data-item-id') === 'authority' ||
-              (a.getAttribute('aria-label') || '').toLowerCase().includes('website') ||
-              (a.innerText || '').toLowerCase().trim() === 'website'
+          return !!Array.from(document.querySelectorAll('a, button')).find(
+            (el) =>
+              el.getAttribute('data-item-id') === 'authority' ||
+              (el.getAttribute('aria-label') || '').toLowerCase().includes('website') ||
+              (el.innerText || '').toLowerCase().trim() === 'website'
           );
-          return !!websiteBtn;
         });
 
         if (hasWebsite) {
@@ -97,13 +110,12 @@ app.post('/api/scrape', async (req, res) => {
 
           const addressEl = document.querySelector('[data-item-id="address"]');
           const address = addressEl
-            ? addressEl.closest('button')?.getAttribute('aria-label') ||
-              addressEl.closest('[aria-label]')?.getAttribute('aria-label') || ''
+            ? addressEl.closest('[aria-label]')?.getAttribute('aria-label') || ''
             : '';
 
           const phoneEl = document.querySelector('[data-item-id^="phone:tel"]');
           const phone = phoneEl
-            ? phoneEl.closest('button')?.getAttribute('aria-label') || ''
+            ? phoneEl.closest('[aria-label]')?.getAttribute('aria-label') || ''
             : '';
 
           const ratingEl = document.querySelector('[role="img"][aria-label*="star"]');
@@ -127,15 +139,12 @@ app.post('/api/scrape', async (req, res) => {
           continue;
         }
 
-        const cleanPhone = details.phone.replace(/^Phone:\s*/i, '').trim();
-        const cleanAddress = details.address.replace(/^Address:\s*/i, '').trim();
-
         seenBusinessIds.add(bizId);
         leads.push({
           id: bizId,
           name: details.name,
-          address: cleanAddress,
-          phone: cleanPhone,
+          address: details.address.replace(/^Address:\s*/i, '').trim(),
+          phone: details.phone.replace(/^Phone:\s*/i, '').trim(),
           rating: details.rating,
           reviews: details.reviews,
           category: details.category || niche,
@@ -144,21 +153,16 @@ app.post('/api/scrape', async (req, res) => {
           foundAt: new Date().toISOString(),
         });
 
-        console.log(`✓ Lead: ${details.name} (no website)`);
+        console.log(`✓ ${details.name}`);
         await detailPage.close();
       } catch (err) {
-        console.error(`Error processing listing: ${err.message}`);
+        console.error(`Listing error: ${err.message}`);
       }
     }
 
     await browser.close();
+    res.json({ success: true, leads, totalFound: leads.length, totalSeen: seenBusinessIds.size });
 
-    res.json({
-      success: true,
-      leads,
-      totalFound: leads.length,
-      totalSeen: seenBusinessIds.size,
-    });
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
     console.error('Scrape error:', err);
@@ -168,7 +172,7 @@ app.post('/api/scrape', async (req, res) => {
 
 app.post('/api/clear-history', (req, res) => {
   seenBusinessIds.clear();
-  res.json({ success: true, message: 'History cleared' });
+  res.json({ success: true });
 });
 
 app.get('/api/stats', (req, res) => {
