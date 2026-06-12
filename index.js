@@ -6,16 +6,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/api/chrome-path', async (req, res) => {
-  const { execSync } = require('child_process');
-  try {
-    const result = execSync('find /opt/render -name "chrome" -type f 2>/dev/null || find /root -name "chrome" -type f 2>/dev/null || which chromium-browser || which google-chrome || which chromium').toString();
-    res.json({ paths: result.split('\n').filter(Boolean) });
-  } catch(e) {
-    res.json({ error: e.message, msg: "Chrome not found anywhere" });
-  }
-});
-
 const seenBusinessIds = new Set();
 
 app.get('/api/health', (req, res) => {
@@ -40,7 +30,10 @@ app.post('/api/scrape', async (req, res) => {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-zygote',
-        '--single-process'
+        '--single-process',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--memory-pressure-off'
       ]
     });
 
@@ -49,8 +42,8 @@ app.post('/api/scrape', async (req, res) => {
     await page.setViewport({ width: 1280, height: 800 });
 
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 1500));
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
 
     for (let i = 0; i < 4; i++) {
       await page.evaluate(() => {
@@ -68,6 +61,7 @@ app.post('/api/scrape', async (req, res) => {
 
     console.log(`Found ${listingLinks.length} listings for "${query}"`);
 
+    // Use same page instead of opening new tabs
     for (const link of listingLinks) {
       if (leads.length >= limit) break;
 
@@ -75,26 +69,18 @@ app.post('/api/scrape', async (req, res) => {
       if (seenBusinessIds.has(bizId)) continue;
 
       try {
-        const detailPage = await browser.newPage();
-        await detailPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await detailPage.goto(link, { waitUntil: 'networkidle2', timeout: 20000 });
+        await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 15000 });
         await new Promise(r => setTimeout(r, 500));
 
-        const hasWebsite = await detailPage.evaluate(() => {
-          return !!Array.from(document.querySelectorAll('a, button')).find(el =>
+        const result = await page.evaluate(() => {
+          const hasWebsite = !!Array.from(document.querySelectorAll('a, button')).find(el =>
             el.getAttribute('data-item-id') === 'authority' ||
             (el.getAttribute('aria-label') || '').toLowerCase().includes('website') ||
             (el.innerText || '').toLowerCase().trim() === 'website'
           );
-        });
 
-        if (hasWebsite) {
-          seenBusinessIds.add(bizId);
-          await detailPage.close();
-          continue;
-        }
+          if (hasWebsite) return { hasWebsite: true };
 
-        const details = await detailPage.evaluate(() => {
           const name = document.querySelector('h1')?.innerText?.trim() ||
             document.title.replace(' - Google Maps', '').trim();
 
@@ -115,30 +101,27 @@ app.post('/api/scrape', async (req, res) => {
           const categoryEl = document.querySelector('button[jsaction*="category"]');
           const category = categoryEl?.innerText?.trim() || '';
 
-          return { name, address, phone, rating, reviews, category };
+          return { hasWebsite: false, name, address, phone, rating, reviews, category };
         });
 
-        if (!details.name || details.name.length < 2) {
-          await detailPage.close();
-          continue;
-        }
-
         seenBusinessIds.add(bizId);
+
+        if (result.hasWebsite || !result.name || result.name.length < 2) continue;
+
         leads.push({
           id: bizId,
-          name: details.name,
-          address: details.address.replace(/^Address:\s*/i, '').trim(),
-          phone: details.phone.replace(/^Phone:\s*/i, '').trim(),
-          rating: details.rating,
-          reviews: details.reviews,
-          category: details.category || niche,
+          name: result.name,
+          address: result.address.replace(/^Address:\s*/i, '').trim(),
+          phone: result.phone.replace(/^Phone:\s*/i, '').trim(),
+          rating: result.rating,
+          reviews: result.reviews,
+          category: result.category || niche,
           hasWebsite: false,
           gmapsUrl: link,
           foundAt: new Date().toISOString(),
         });
 
-        console.log(`✓ ${details.name}`);
-        await detailPage.close();
+        console.log(`✓ ${result.name}`);
       } catch (err) {
         console.error(`Listing error: ${err.message}`);
       }
