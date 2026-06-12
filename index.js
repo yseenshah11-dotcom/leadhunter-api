@@ -154,7 +154,6 @@ app.post('/api/scrape', async (req, res) => {
 });
 
 async function runScrape(niche, city, limit, scanId, mode) {
-  const query = `${niche} in ${city}`;
   const leads = [];
   let browser;
   let page;
@@ -183,44 +182,70 @@ async function runScrape(niche, city, limit, scanId, mode) {
   try {
     await launchBrowser();
 
-    const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 2000));
+    // Generate multiple search queries to find more listings
+    const searchQueries = [
+      `${niche} in ${city}`,
+      `${niche} near ${city}`,
+      `best ${niche} ${city}`,
+      `local ${niche} ${city}`,
+      `affordable ${niche} ${city}`,
+    ];
 
-    const maxScrolls = mode === 'overnight' ? 200 : mode === 'unlimited' ? 150 : Math.ceil(limit * 5);
-    let listingLinks = [];
-    let scrollAttempts = 0;
-    let reachedEnd = false;
+    let allListingLinks = [];
 
-    while (scrollAttempts < maxScrolls && !reachedEnd) {
-      await page.evaluate(() => {
-        const feed = document.querySelector('[role="feed"]');
-        if (feed) feed.scrollBy(0, 1500);
-      });
-      await new Promise(r => setTimeout(r, 400));
-      scrollAttempts++;
+    for (const searchQuery of searchQueries) {
+      if (allListingLinks.length >= limit * 10) break;
 
-      reachedEnd = await page.evaluate(() => {
-        const feed = document.querySelector('[role="feed"]');
-        return !!document.querySelector('.HlvSq') ||
-          (feed && feed.innerText.includes("You've reached the end"));
-      });
+      console.log(`Searching: ${searchQuery}`);
+      const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`;
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await new Promise(r => setTimeout(r, 2000));
 
-      listingLinks = await page.evaluate(() => {
-        const anchors = Array.from(document.querySelectorAll('a[href*="/maps/place/"]'));
-        return [...new Map(anchors.map(a => [a.href.split('?')[0], a.href])).values()];
-      });
+      const maxScrolls = mode === 'overnight' ? 200 : mode === 'unlimited' ? 150 : Math.ceil(limit * 5);
+      let scrollAttempts = 0;
+      let reachedEnd = false;
 
-      if (activeScans[scanId]) {
-        activeScans[scanId].totalScanned = listingLinks.length;
-        activeScans[scanId].progress = Math.min(Math.round((scrollAttempts / maxScrolls) * 15), 15);
-        activeScans[scanId].status = 'loading_listings';
+      while (scrollAttempts < maxScrolls && !reachedEnd) {
+        await page.evaluate(() => {
+          const feed = document.querySelector('[role="feed"]');
+          if (feed) feed.scrollBy(0, 1500);
+        });
+        await new Promise(r => setTimeout(r, 400));
+        scrollAttempts++;
+
+        reachedEnd = await page.evaluate(() => {
+          const feed = document.querySelector('[role="feed"]');
+          return !!document.querySelector('.HlvSq') ||
+            (feed && feed.innerText.includes("You've reached the end"));
+        });
+
+        const newLinks = await page.evaluate(() => {
+          const anchors = Array.from(document.querySelectorAll('a[href*="/maps/place/"]'));
+          return [...new Map(anchors.map(a => [a.href.split('?')[0], a.href])).values()];
+        });
+
+        const existingSet = new Set(allListingLinks);
+        for (const link of newLinks) {
+          if (!existingSet.has(link)) {
+            allListingLinks.push(link);
+            existingSet.add(link);
+          }
+        }
+
+        if (activeScans[scanId]) {
+          activeScans[scanId].totalScanned = allListingLinks.length;
+          activeScans[scanId].progress = Math.min(Math.round((scrollAttempts / maxScrolls) * 15), 15);
+          activeScans[scanId].status = 'loading_listings';
+        }
+
+        if (reachedEnd) break;
       }
 
-      if (reachedEnd) break;
+      console.log(`Total unique listings so far: ${allListingLinks.length}`);
     }
 
-    console.log(`Loaded ${listingLinks.length} listings for "${query}"`);
+    const listingLinks = allListingLinks;
+    console.log(`Total listings to check: ${listingLinks.length}`);
 
     if (activeScans[scanId]) {
       activeScans[scanId].status = 'checking_listings';
