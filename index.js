@@ -12,6 +12,43 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', seen: seenBusinessIds.size });
 });
 
+async function checkHasWebsite(page, businessName, address) {
+  try {
+    const searchQuery = `"${businessName}" ${address} website`;
+    await page.goto(`https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 10000
+    });
+    await new Promise(r => setTimeout(r, 500));
+
+    const result = await page.evaluate(() => {
+      // Check if any organic result links to a real website (not Google, Yelp, Facebook, directories)
+      const directoryDomains = [
+        'yelp.com', 'facebook.com', 'google.com', 'yellowpages.com',
+        'bbb.org', 'angi.com', 'thumbtack.com', 'homeadvisor.com',
+        'houzz.com', 'nextdoor.com', 'linkedin.com', 'instagram.com',
+        'twitter.com', 'mapquest.com', 'tripadvisor.com', 'bark.com',
+        'porch.com', 'angieslist.com', 'manta.com', 'chamberofcommerce.com'
+      ];
+
+      const links = Array.from(document.querySelectorAll('a[href]'));
+      const websiteLink = links.find(a => {
+        const href = a.href || '';
+        if (!href.startsWith('http')) return false;
+        const isDirectory = directoryDomains.some(d => href.includes(d));
+        const isGoogleInternal = href.includes('google.com');
+        return !isDirectory && !isGoogleInternal;
+      });
+
+      return !!websiteLink;
+    });
+
+    return result;
+  } catch (e) {
+    return false;
+  }
+}
+
 app.post('/api/scrape', async (req, res) => {
   const { niche, city, limit = 10 } = req.body;
   if (!niche || !city) return res.status(400).json({ error: 'niche and city are required' });
@@ -32,7 +69,6 @@ app.post('/api/scrape', async (req, res) => {
         '--no-zygote',
         '--single-process',
         '--disable-extensions',
-        '--disable-background-networking',
         '--memory-pressure-off'
       ]
     });
@@ -61,7 +97,6 @@ app.post('/api/scrape', async (req, res) => {
 
     console.log(`Found ${listingLinks.length} listings for "${query}"`);
 
-    // Use same page instead of opening new tabs
     for (const link of listingLinks) {
       if (leads.length >= limit) break;
 
@@ -69,17 +104,13 @@ app.post('/api/scrape', async (req, res) => {
       if (seenBusinessIds.has(bizId)) continue;
 
       try {
+        // Step 1: Check Google Maps listing
         await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 15000 });
         await new Promise(r => setTimeout(r, 500));
 
         const result = await page.evaluate(() => {
-          const hasWebsite = !!Array.from(document.querySelectorAll('a, button')).find(el =>
-            el.getAttribute('data-item-id') === 'authority' ||
-            (el.getAttribute('aria-label') || '').toLowerCase().includes('website') ||
-            (el.innerText || '').toLowerCase().trim() === 'website'
-          );
-
-          if (hasWebsite) return { hasWebsite: true };
+          const websiteLink = document.querySelector('a[data-item-id="authority"]');
+          const hasWebsite = !!websiteLink;
 
           const name = document.querySelector('h1')?.innerText?.trim() ||
             document.title.replace(' - Google Maps', '').trim();
@@ -101,12 +132,25 @@ app.post('/api/scrape', async (req, res) => {
           const categoryEl = document.querySelector('button[jsaction*="category"]');
           const category = categoryEl?.innerText?.trim() || '';
 
-          return { hasWebsite: false, name, address, phone, rating, reviews, category };
+          return { hasWebsite, name, address, phone, rating, reviews, category };
         });
 
         seenBusinessIds.add(bizId);
 
-        if (result.hasWebsite || !result.name || result.name.length < 2) continue;
+        // Skip if Google Maps shows a website
+        if (result.hasWebsite || !result.name || result.name.length < 2) {
+          console.log(`✗ Has website on Maps: ${result.name}`);
+          continue;
+        }
+
+        // Step 2: Double check with Google search
+        console.log(`Checking Google for: ${result.name}`);
+        const hasWebsiteOnGoogle = await checkHasWebsite(page, result.name, result.address);
+
+        if (hasWebsiteOnGoogle) {
+          console.log(`✗ Has website on Google: ${result.name}`);
+          continue;
+        }
 
         leads.push({
           id: bizId,
@@ -121,7 +165,7 @@ app.post('/api/scrape', async (req, res) => {
           foundAt: new Date().toISOString(),
         });
 
-        console.log(`✓ ${result.name}`);
+        console.log(`✓ Confirmed no website: ${result.name}`);
       } catch (err) {
         console.error(`Listing error: ${err.message}`);
       }
