@@ -6,6 +6,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get('/api/chrome-path', async (req, res) => {
+  const { execSync } = require('child_process');
+  try {
+    const result = execSync('find /opt/render/project/src/.cache -name "chrome" -type f 2>/dev/null').toString();
+    res.json({ paths: result.split('\n').filter(Boolean) });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
 const seenBusinessIds = new Set();
 
 app.get('/api/health', (req, res) => {
