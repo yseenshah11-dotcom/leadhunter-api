@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { chromium } = require('playwright');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(cors());
@@ -14,66 +14,48 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/scrape', async (req, res) => {
   const { niche, city, limit = 10 } = req.body;
-  if (!niche || !city) {
-    return res.status(400).json({ error: 'niche and city are required' });
-  }
+  if (!niche || !city) return res.status(400).json({ error: 'niche and city are required' });
 
   const query = `${niche} in ${city}`;
   const leads = [];
   let browser;
 
   try {
-    browser = await chromium.launch({
-      headless: true,
+    browser = await puppeteer.launch({
+      headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-zygote',
-        '--single-process',
-        '--disable-extensions',
-      ],
-      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
+        '--single-process'
+      ]
     });
 
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 800 },
-    });
-
-    const page = await context.newPage();
-    page.setDefaultTimeout(30000);
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1280, height: 800 });
 
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 3000));
 
-    // Accept cookies if prompted
-    await page.click('button[aria-label*="Accept"]').catch(() => {});
-    await page.waitForTimeout(1000);
-
-    // Scroll results to load more
+    // Scroll to load more results
     for (let i = 0; i < 4; i++) {
       await page.evaluate(() => {
         const feed = document.querySelector('[role="feed"]');
         if (feed) feed.scrollBy(0, 1000);
       });
-      await page.waitForTimeout(1500);
+      await new Promise(r => setTimeout(r, 1500));
     }
 
-    // Collect listing URLs
-    const listingLinks = await page.$$eval(
-      'a[href*="/maps/place/"]',
-      (anchors) => [
-        ...new Map(
-          anchors
-            .filter((a) => a.href.includes('/maps/place/'))
-            .map((a) => [a.href.split('?')[0], a.href])
-        ).values(),
-      ].slice(0, 35)
-    );
+    // Get listing links
+    const listingLinks = await page.evaluate(() => {
+      const anchors = Array.from(document.querySelectorAll('a[href*="/maps/place/"]'));
+      const unique = [...new Map(anchors.map(a => [a.href.split('?')[0], a.href])).values()];
+      return unique.slice(0, 35);
+    });
 
     console.log(`Found ${listingLinks.length} listings for "${query}"`);
 
@@ -84,16 +66,16 @@ app.post('/api/scrape', async (req, res) => {
       if (seenBusinessIds.has(bizId)) continue;
 
       try {
-        const detailPage = await context.newPage();
-        await detailPage.goto(link, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await detailPage.waitForTimeout(2000);
+        const detailPage = await browser.newPage();
+        await detailPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await detailPage.goto(link, { waitUntil: 'networkidle2', timeout: 20000 });
+        await new Promise(r => setTimeout(r, 2000));
 
         const hasWebsite = await detailPage.evaluate(() => {
-          return !!Array.from(document.querySelectorAll('a, button')).find(
-            (el) =>
-              el.getAttribute('data-item-id') === 'authority' ||
-              (el.getAttribute('aria-label') || '').toLowerCase().includes('website') ||
-              (el.innerText || '').toLowerCase().trim() === 'website'
+          return !!Array.from(document.querySelectorAll('a, button')).find(el =>
+            el.getAttribute('data-item-id') === 'authority' ||
+            (el.getAttribute('aria-label') || '').toLowerCase().includes('website') ||
+            (el.innerText || '').toLowerCase().trim() === 'website'
           );
         });
 
@@ -104,28 +86,21 @@ app.post('/api/scrape', async (req, res) => {
         }
 
         const details = await detailPage.evaluate(() => {
-          const name =
-            document.querySelector('h1')?.innerText?.trim() ||
+          const name = document.querySelector('h1')?.innerText?.trim() ||
             document.title.replace(' - Google Maps', '').trim();
 
           const addressEl = document.querySelector('[data-item-id="address"]');
-          const address = addressEl
-            ? addressEl.closest('[aria-label]')?.getAttribute('aria-label') || ''
-            : '';
+          const address = addressEl?.closest('[aria-label]')?.getAttribute('aria-label') || '';
 
           const phoneEl = document.querySelector('[data-item-id^="phone:tel"]');
-          const phone = phoneEl
-            ? phoneEl.closest('[aria-label]')?.getAttribute('aria-label') || ''
-            : '';
+          const phone = phoneEl?.closest('[aria-label]')?.getAttribute('aria-label') || '';
 
           const ratingEl = document.querySelector('[role="img"][aria-label*="star"]');
-          const ratingText = ratingEl?.getAttribute('aria-label') || '';
-          const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
+          const ratingMatch = (ratingEl?.getAttribute('aria-label') || '').match(/(\d+\.?\d*)/);
           const rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
 
           const reviewsEl = document.querySelector('button[aria-label*="review"]');
-          const reviewsText = reviewsEl?.getAttribute('aria-label') || '';
-          const reviewsMatch = reviewsText.match(/(\d[\d,]*)/);
+          const reviewsMatch = (reviewsEl?.getAttribute('aria-label') || '').match(/(\d[\d,]*)/);
           const reviews = reviewsMatch ? parseInt(reviewsMatch[1].replace(',', '')) : null;
 
           const categoryEl = document.querySelector('button[jsaction*="category"]');
