@@ -23,6 +23,8 @@ app.post('/api/scrape', async (req, res) => {
   try {
     browser = await puppeteer.launch({
       headless: 'new',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH ||
+        '/opt/render/project/src/.cache/puppeteer/chrome/linux-121.0.6167.85/chrome-linux64/chrome',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -41,7 +43,6 @@ app.post('/api/scrape', async (req, res) => {
     await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await new Promise(r => setTimeout(r, 3000));
 
-    // Scroll to load more results
     for (let i = 0; i < 4; i++) {
       await page.evaluate(() => {
         const feed = document.querySelector('[role="feed"]');
@@ -50,7 +51,6 @@ app.post('/api/scrape', async (req, res) => {
       await new Promise(r => setTimeout(r, 1500));
     }
 
-    // Get listing links
     const listingLinks = await page.evaluate(() => {
       const anchors = Array.from(document.querySelectorAll('a[href*="/maps/place/"]'));
       const unique = [...new Map(anchors.map(a => [a.href.split('?')[0], a.href])).values()];
