@@ -12,7 +12,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Create tables on startup
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS seen_businesses (
@@ -177,7 +176,7 @@ async function runScrape(niche, city, limit, scanId, mode) {
     await page.setViewport({ width: 1280, height: 800 });
 
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await new Promise(r => setTimeout(r, 2000));
 
     const maxScrolls = mode === 'overnight' ? 200 : mode === 'unlimited' ? 150 : Math.ceil(limit * 5);
@@ -226,12 +225,11 @@ async function runScrape(niche, city, limit, scanId, mode) {
 
       const bizId = link.split('/maps/place/')[1]?.split('/')[0] || link;
 
-      // Check DB for seen status
       const seen = await isSeen(bizId).catch(() => false);
       if (seen) continue;
 
       try {
-        await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await new Promise(r => setTimeout(r, 600));
 
         const result = await page.evaluate(() => {
@@ -253,7 +251,6 @@ async function runScrape(niche, city, limit, scanId, mode) {
           return { hasWebsite, name, address, phone, rating, reviews, category };
         });
 
-        // Always mark as seen so we never check it again
         await markSeen(bizId, result.name).catch(() => {});
         totalScanned++;
 
