@@ -1,4 +1,4 @@
-const express = require('express');
+constconst express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer');
 
@@ -9,10 +9,10 @@ app.use(express.json());
 app.get('/api/chrome-path', async (req, res) => {
   const { execSync } = require('child_process');
   try {
-    const result = execSync('find /opt/render/project/src/.cache -name "chrome" -type f 2>/dev/null').toString();
+    const result = execSync('find /opt/render -name "chrome" -type f 2>/dev/null || find /root -name "chrome" -type f 2>/dev/null || which chromium-browser || which google-chrome || which chromium').toString();
     res.json({ paths: result.split('\n').filter(Boolean) });
   } catch(e) {
-    res.json({ error: e.message });
+    res.json({ error: e.message, msg: "Chrome not found anywhere" });
   }
 });
 
