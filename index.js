@@ -1,4 +1,4 @@
-constconst express = require('express');
+const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer');
 
@@ -33,8 +33,7 @@ app.post('/api/scrape', async (req, res) => {
   try {
     browser = await puppeteer.launch({
       headless: 'new',
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH ||
-        '/opt/render/project/src/.cache/puppeteer/chrome/linux-121.0.6167.85/chrome-linux64/chrome',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
