@@ -50,14 +50,14 @@ app.post('/api/scrape', async (req, res) => {
 
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
     await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 1500));
 
     for (let i = 0; i < 4; i++) {
       await page.evaluate(() => {
         const feed = document.querySelector('[role="feed"]');
         if (feed) feed.scrollBy(0, 1000);
       });
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 800));
     }
 
     const listingLinks = await page.evaluate(() => {
@@ -78,7 +78,7 @@ app.post('/api/scrape', async (req, res) => {
         const detailPage = await browser.newPage();
         await detailPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await detailPage.goto(link, { waitUntil: 'networkidle2', timeout: 20000 });
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 500));
 
         const hasWebsite = await detailPage.evaluate(() => {
           return !!Array.from(document.querySelectorAll('a, button')).find(el =>
