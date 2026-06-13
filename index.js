@@ -120,6 +120,7 @@ app.post('/api/scrape', async (req, res) => {
     leads: [],
     totalScanned: 0,
     totalFound: 0,
+    totalListings: 0,
     progress: 0,
     startedAt: new Date().toISOString()
   };
@@ -133,23 +134,7 @@ app.post('/api/scrape', async (req, res) => {
     }
   });
 
-  if (mode === 'normal') {
-    const result = await new Promise((resolve) => {
-      const interval = setInterval(() => {
-        const scan = activeScans[scanId];
-        if (scan && (scan.status === 'done' || scan.status === 'error')) {
-          clearInterval(interval);
-          resolve(scan);
-        }
-      }, 1000);
-      setTimeout(() => {
-        clearInterval(interval);
-        resolve(activeScans[scanId] || { leads: [], totalFound: 0 });
-      }, 300000);
-    });
-    return res.json({ ...result, scanId });
-  }
-
+  // Always return scanId immediately — frontend polls for progress
   res.json({ scanId, status: 'started', message: 'Scan running in background' });
 });
 
@@ -182,7 +167,6 @@ async function runScrape(niche, city, limit, scanId, mode) {
   try {
     await launchBrowser();
 
-    // Generate multiple search queries to find more listings
     const searchQueries = [
       `${niche} in ${city}`,
       `${niche} near ${city}`,
@@ -233,7 +217,7 @@ async function runScrape(niche, city, limit, scanId, mode) {
         }
 
         if (activeScans[scanId]) {
-          activeScans[scanId].totalScanned = allListingLinks.length;
+          activeScans[scanId].totalListings = allListingLinks.length;
           activeScans[scanId].progress = Math.min(Math.round((scrollAttempts / maxScrolls) * 15), 15);
           activeScans[scanId].status = 'loading_listings';
         }
@@ -256,7 +240,6 @@ async function runScrape(niche, city, limit, scanId, mode) {
       const link = listingLinks[i];
       if (leads.length >= limit) break;
 
-      // Restart browser every 10 listings to free memory
       if (i > 0 && i % 10 === 0) {
         console.log(`Restarting browser at listing ${i} to free memory...`);
         await browser.close().catch(() => {});
