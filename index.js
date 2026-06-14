@@ -23,9 +23,10 @@ async function initDB() {
       name TEXT,
       added_at TIMESTAMP DEFAULT NOW()
     );
+
     CREATE TABLE IF NOT EXISTS leads (
       id TEXT PRIMARY KEY,
-      name TEXT,
+      name TEXT NOT NULL,
       address TEXT,
       phone TEXT,
       rating FLOAT,
@@ -34,7 +35,10 @@ async function initDB() {
       niche TEXT,
       city TEXT,
       gmaps_url TEXT,
-      found_at TIMESTAMP DEFAULT NOW()
+      status TEXT DEFAULT 'new',
+      notes TEXT DEFAULT '',
+      found_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
   console.log('Database initialized');
@@ -44,13 +48,33 @@ initDB().catch(console.error);
 
 const activeScans = {};
 
+const NICHES = {
+  'Home Services': [
+    'HVAC contractor', 'roofing contractor', 'plumber', 'electrician',
+    'landscaping', 'pest control', 'painting contractor', 'cleaning service',
+    'general contractor', 'handyman', 'pressure washing', 'carpet cleaning',
+    'tree service', 'pool service', 'fence contractor', 'deck builder',
+    'flooring contractor', 'garage door repair', 'window cleaning', 'drywall contractor'
+  ],
+  'Professional': [
+    'dentist', 'chiropractor', 'optometrist', 'veterinarian',
+    'accountant', 'attorney', 'real estate agent', 'insurance agent',
+    'therapist', 'financial advisor'
+  ],
+  'Retail & Food': [
+    'restaurant', 'bakery', 'barbershop', 'hair salon', 'nail salon',
+    'laundromat', 'auto repair', 'auto detailing', 'towing service',
+    'gym', 'yoga studio', 'tattoo shop', 'daycare', 'moving company', 'locksmith'
+  ]
+};
+
 const NON_BUSINESS_KEYWORDS = [
-  'park', 'school', 'church', 'temple', 'mosque', 'library', 'government',
-  'city of', 'county of', 'state of', 'department of', 'united states',
+  'park', 'school', 'church', 'temple', 'mosque', 'library',
+  'city of', 'county of', 'state of', 'department of',
   'post office', 'dmv', 'courthouse', 'fire station', 'police station',
   'hospital', 'university', 'college', 'elementary', 'middle school',
   'high school', 'national park', 'recreation center', 'community center',
-  'public', 'municipal', 'federal', 'nonprofit', 'non-profit'
+  'municipal', 'federal', 'nonprofit'
 ];
 
 function isRealBusiness(name, category) {
@@ -59,38 +83,119 @@ function isRealBusiness(name, category) {
 }
 
 async function isSeen(bizId) {
-  const result = await pool.query('SELECT id FROM seen_businesses WHERE id = $1', [bizId]);
-  return result.rows.length > 0;
+  try {
+    const result = await pool.query('SELECT id FROM seen_businesses WHERE id = $1', [bizId]);
+    return result.rows.length > 0;
+  } catch { return false; }
 }
 
 async function markSeen(bizId, name) {
-  await pool.query(
-    'INSERT INTO seen_businesses (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
-    [bizId, name]
-  );
+  try {
+    await pool.query(
+      'INSERT INTO seen_businesses (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
+      [bizId, name || '']
+    );
+  } catch {}
 }
 
 async function saveLead(lead) {
-  await pool.query(`
-    INSERT INTO leads (id, name, address, phone, rating, reviews, category, niche, city, gmaps_url)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-    ON CONFLICT (id) DO NOTHING
-  `, [lead.id, lead.name, lead.address, lead.phone, lead.rating, lead.reviews, lead.category, lead.niche, lead.city, lead.gmapsUrl]);
+  try {
+    await pool.query(`
+      INSERT INTO leads (id, name, address, phone, rating, reviews, category, niche, city, gmaps_url, status)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'new')
+      ON CONFLICT (id) DO NOTHING
+    `, [lead.id, lead.name, lead.address, lead.phone, lead.rating,
+        lead.reviews, lead.category, lead.niche, lead.city, lead.gmapsUrl]);
+  } catch {}
 }
 
-async function getSeenCount() {
-  const result = await pool.query('SELECT COUNT(*) FROM seen_businesses');
-  return parseInt(result.rows[0].count);
-}
-
-async function getAllLeads() {
-  const result = await pool.query('SELECT * FROM leads ORDER BY found_at DESC');
-  return result.rows;
-}
+// ─── API Routes ───────────────────────────────────────────────────────────────
 
 app.get('/api/health', async (req, res) => {
-  const seenCount = await getSeenCount().catch(() => 0);
-  res.json({ status: 'ok', seen: seenCount, activeScans: Object.keys(activeScans).length });
+  const seen = await pool.query('SELECT COUNT(*) FROM seen_businesses').catch(() => ({ rows: [{ count: 0 }] }));
+  const leads = await pool.query('SELECT COUNT(*) FROM leads').catch(() => ({ rows: [{ count: 0 }] }));
+  res.json({
+    status: 'ok',
+    totalSeen: parseInt(seen.rows[0].count),
+    totalLeads: parseInt(leads.rows[0].count),
+    activeScans: Object.keys(activeScans).length
+  });
+});
+
+app.get('/api/niches', (req, res) => {
+  res.json(NICHES);
+});
+
+app.get('/api/leads', async (req, res) => {
+  try {
+    const { niche, status, city, search } = req.query;
+    let query = 'SELECT * FROM leads WHERE 1=1';
+    const params = [];
+
+    if (niche) { params.push(niche); query += ` AND niche ILIKE $${params.length}`; }
+    if (status) { params.push(status); query += ` AND status = $${params.length}`; }
+    if (city) { params.push(`%${city}%`); query += ` AND city ILIKE $${params.length}`; }
+    if (search) {
+      params.push(`%${search}%`);
+      query += ` AND (name ILIKE $${params.length} OR address ILIKE $${params.length} OR phone ILIKE $${params.length})`;
+    }
+
+    query += ' ORDER BY found_at DESC';
+    const result = await pool.query(query, params);
+    res.json({ leads: result.rows, total: result.rows.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch('/api/leads/:id', async (req, res) => {
+  try {
+    const { status, notes } = req.body;
+    const updates = [];
+    const params = [];
+
+    if (status !== undefined) { params.push(status); updates.push(`status = $${params.length}`); }
+    if (notes !== undefined) { params.push(notes); updates.push(`notes = $${params.length}`); }
+
+    if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+    params.push(req.params.id);
+    await pool.query(
+      `UPDATE leads SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`,
+      params
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/leads/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM leads WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/stats', async (req, res) => {
+  try {
+    const total = await pool.query('SELECT COUNT(*) FROM leads');
+    const byStatus = await pool.query('SELECT status, COUNT(*) as count FROM leads GROUP BY status');
+    const byNiche = await pool.query('SELECT niche, COUNT(*) as count FROM leads GROUP BY niche ORDER BY count DESC');
+    const seen = await pool.query('SELECT COUNT(*) FROM seen_businesses');
+
+    res.json({
+      totalLeads: parseInt(total.rows[0].count),
+      totalSeen: parseInt(seen.rows[0].count),
+      byStatus: byStatus.rows.reduce((acc, r) => ({ ...acc, [r.status]: parseInt(r.count) }), {}),
+      byNiche: byNiche.rows.map(r => ({ niche: r.niche, count: parseInt(r.count) })),
+      activeScans: Object.keys(activeScans).length
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/scan-progress/:scanId', (req, res) => {
@@ -99,24 +204,15 @@ app.get('/api/scan-progress/:scanId', (req, res) => {
   res.json(scan);
 });
 
-app.get('/api/all-leads', async (req, res) => {
-  const leads = await getAllLeads().catch(() => []);
-  res.json({ leads, total: leads.length });
-});
-
-app.get('/api/stats', async (req, res) => {
-  const seenCount = await getSeenCount().catch(() => 0);
-  res.json({ totalSeen: seenCount, activeScans: Object.keys(activeScans).length });
-});
-
 app.post('/api/scrape', async (req, res) => {
-  const { niche, city, limit = 10, mode = 'normal' } = req.body;
+  const { niche, city, limit = 10 } = req.body;
   if (!niche || !city) return res.status(400).json({ error: 'niche and city are required' });
 
   const scanId = Date.now().toString();
   activeScans[scanId] = {
     status: 'running',
-    niche, city, mode,
+    statusMessage: 'Starting scan...',
+    niche, city, limit,
     leads: [],
     totalScanned: 0,
     totalFound: 0,
@@ -125,26 +221,42 @@ app.post('/api/scrape', async (req, res) => {
     startedAt: new Date().toISOString()
   };
 
-  const actualLimit = mode === 'overnight' ? 500 : mode === 'unlimited' ? 99999 : limit;
-
-  runScrape(niche, city, actualLimit, scanId, mode).catch(err => {
+  runScrape(niche, city, limit, scanId).catch(err => {
     if (activeScans[scanId]) {
       activeScans[scanId].status = 'error';
       activeScans[scanId].error = err.message;
     }
   });
 
-  // Always return scanId immediately — frontend polls for progress
-  res.json({ scanId, status: 'started', message: 'Scan running in background' });
+  res.json({ scanId, status: 'started' });
 });
 
-async function runScrape(niche, city, limit, scanId, mode) {
+app.post('/api/clear-history', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM seen_businesses');
+    await pool.query('DELETE FROM leads');
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Scraper ─────────────────────────────────────────────────────────────────
+
+async function runScrape(niche, city, limit, scanId) {
   const leads = [];
   let browser;
   let page;
   let totalScanned = 0;
 
+  function updateScan(updates) {
+    if (activeScans[scanId]) {
+      Object.assign(activeScans[scanId], updates);
+    }
+  }
+
   async function launchBrowser() {
+    if (browser) await browser.close().catch(() => {});
     browser = await puppeteer.launch({
       headless: 'new',
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -156,136 +268,148 @@ async function runScrape(niche, city, limit, scanId, mode) {
         '--no-zygote',
         '--single-process',
         '--disable-extensions',
-        '--memory-pressure-off'
+        '--memory-pressure-off',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--mute-audio'
       ]
     });
     page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const type = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
   }
 
   try {
     await launchBrowser();
 
+    // Multiple search queries to maximize listings found
     const searchQueries = [
       `${niche} in ${city}`,
       `${niche} near ${city}`,
-      `best ${niche} ${city}`,
       `local ${niche} ${city}`,
-      `affordable ${niche} ${city}`,
     ];
 
     let allListingLinks = [];
 
     for (const searchQuery of searchQueries) {
-      if (allListingLinks.length >= limit * 10) break;
+      if (allListingLinks.length >= limit * 8) break;
 
+      updateScan({ statusMessage: `Searching: ${searchQuery}` });
       console.log(`Searching: ${searchQuery}`);
-      const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`;
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await new Promise(r => setTimeout(r, 2000));
 
-      const maxScrolls = mode === 'overnight' ? 200 : mode === 'unlimited' ? 150 : Math.ceil(limit * 5);
-      let scrollAttempts = 0;
-      let reachedEnd = false;
+      try {
+        await page.goto(
+          `https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`,
+          { waitUntil: 'domcontentloaded', timeout: 30000 }
+        );
+        await new Promise(r => setTimeout(r, 1500));
 
-      while (scrollAttempts < maxScrolls && !reachedEnd) {
-        await page.evaluate(() => {
-          const feed = document.querySelector('[role="feed"]');
-          if (feed) feed.scrollBy(0, 1500);
-        });
-        await new Promise(r => setTimeout(r, 400));
-        scrollAttempts++;
+        // Scroll to load listings
+        const maxScrolls = Math.min(Math.ceil(limit * 3), 60);
+        let scrollAttempts = 0;
+        let reachedEnd = false;
 
-        reachedEnd = await page.evaluate(() => {
-          const feed = document.querySelector('[role="feed"]');
-          return !!document.querySelector('.HlvSq') ||
-            (feed && feed.innerText.includes("You've reached the end"));
-        });
+        while (scrollAttempts < maxScrolls && !reachedEnd) {
+          await page.evaluate(() => {
+            const feed = document.querySelector('[role="feed"]');
+            if (feed) feed.scrollBy(0, 2000);
+          }).catch(() => {});
+          await new Promise(r => setTimeout(r, 500));
+          scrollAttempts++;
 
-        const newLinks = await page.evaluate(() => {
-          const anchors = Array.from(document.querySelectorAll('a[href*="/maps/place/"]'));
-          return [...new Map(anchors.map(a => [a.href.split('?')[0], a.href])).values()];
-        });
+          reachedEnd = await page.evaluate(() => {
+            const feed = document.querySelector('[role="feed"]');
+            return !feed || feed.innerText.includes("You've reached the end") ||
+              !!document.querySelector('.HlvSq');
+          }).catch(() => false);
 
-        const existingSet = new Set(allListingLinks);
-        for (const link of newLinks) {
-          if (!existingSet.has(link)) {
-            allListingLinks.push(link);
-            existingSet.add(link);
+          const newLinks = await page.evaluate(() => {
+            return [...new Map(
+              Array.from(document.querySelectorAll('a[href*="/maps/place/"]'))
+                .map(a => [a.href.split('?')[0], a.href])
+            ).values()];
+          }).catch(() => []);
+
+          const existingSet = new Set(allListingLinks);
+          for (const link of newLinks) {
+            if (!existingSet.has(link)) allListingLinks.push(link);
           }
-        }
 
-        if (activeScans[scanId]) {
-          activeScans[scanId].totalListings = allListingLinks.length;
-          activeScans[scanId].progress = Math.min(Math.round((scrollAttempts / maxScrolls) * 15), 15);
-          activeScans[scanId].status = 'loading_listings';
-        }
+          updateScan({
+            totalListings: allListingLinks.length,
+            statusMessage: `Loading listings... ${allListingLinks.length} found`
+          });
 
-        if (reachedEnd) break;
+          if (reachedEnd || allListingLinks.length >= limit * 8) break;
+        }
+      } catch (err) {
+        console.error(`Search error: ${err.message}`);
       }
-
-      console.log(`Total unique listings so far: ${allListingLinks.length}`);
     }
 
-    const listingLinks = allListingLinks;
-    console.log(`Total listings to check: ${listingLinks.length}`);
+    console.log(`Total listings to check: ${allListingLinks.length}`);
+    updateScan({
+      totalListings: allListingLinks.length,
+      statusMessage: `Checking ${allListingLinks.length} businesses...`
+    });
 
-    if (activeScans[scanId]) {
-      activeScans[scanId].status = 'checking_listings';
-      activeScans[scanId].totalListings = listingLinks.length;
-    }
-
-    for (let i = 0; i < listingLinks.length; i++) {
-      const link = listingLinks[i];
+    // Check each listing
+    for (let i = 0; i < allListingLinks.length; i++) {
       if (leads.length >= limit) break;
 
-      if (i > 0 && i % 10 === 0) {
-        console.log(`Restarting browser at listing ${i} to free memory...`);
-        await browser.close().catch(() => {});
+      // Restart browser every 15 listings to prevent memory issues
+      if (i > 0 && i % 15 === 0) {
+        console.log(`Memory refresh at listing ${i}`);
         await launchBrowser();
       }
 
+      const link = allListingLinks[i];
       const bizId = link.split('/maps/place/')[1]?.split('/')[0] || link;
 
-      const seen = await isSeen(bizId).catch(() => false);
+      const seen = await isSeen(bizId);
       if (seen) continue;
 
       try {
-        await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 600));
+        await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await new Promise(r => setTimeout(r, 400));
 
         const result = await page.evaluate(() => {
           const hasWebsite = !!document.querySelector('a[data-item-id="authority"]');
-          const name = document.querySelector('h1')?.innerText?.trim() ||
-            document.title.replace(' - Google Maps', '').trim();
-          const addressEl = document.querySelector('[data-item-id="address"]');
-          const address = addressEl?.closest('[aria-label]')?.getAttribute('aria-label') || '';
-          const phoneEl = document.querySelector('[data-item-id^="phone:tel"]');
-          const phone = phoneEl?.closest('[aria-label]')?.getAttribute('aria-label') || '';
-          const ratingEl = document.querySelector('[role="img"][aria-label*="star"]');
-          const ratingMatch = (ratingEl?.getAttribute('aria-label') || '').match(/(\d+\.?\d*)/);
-          const rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
-          const reviewsEl = document.querySelector('button[aria-label*="review"]');
-          const reviewsMatch = (reviewsEl?.getAttribute('aria-label') || '').match(/(\d[\d,]*)/);
-          const reviews = reviewsMatch ? parseInt(reviewsMatch[1].replace(',', '')) : null;
-          const categoryEl = document.querySelector('button[jsaction*="category"]');
-          const category = categoryEl?.innerText?.trim() || '';
+          const name = document.querySelector('h1')?.innerText?.trim() || '';
+          const address = document.querySelector('[data-item-id="address"]')
+            ?.closest('[aria-label]')?.getAttribute('aria-label') || '';
+          const phone = document.querySelector('[data-item-id^="phone:tel"]')
+            ?.closest('[aria-label]')?.getAttribute('aria-label') || '';
+          const ratingText = document.querySelector('[role="img"][aria-label*="star"]')
+            ?.getAttribute('aria-label') || '';
+          const rating = parseFloat((ratingText.match(/(\d+\.?\d*)/) || [])[1]) || null;
+          const reviewsText = document.querySelector('button[aria-label*="review"]')
+            ?.getAttribute('aria-label') || '';
+          const reviews = parseInt((reviewsText.match(/(\d[\d,]*)/) || [])[1]?.replace(',', '')) || null;
+          const category = document.querySelector('button[jsaction*="category"]')?.innerText?.trim() || '';
           return { hasWebsite, name, address, phone, rating, reviews, category };
         });
 
-        await markSeen(bizId, result.name).catch(() => {});
+        await markSeen(bizId, result.name);
         totalScanned++;
 
-        if (result.hasWebsite || !result.name || result.name.length < 2) {
-          console.log(`✗ Has website: ${result.name}`);
-          continue;
-        }
+        updateScan({
+          totalScanned,
+          progress: Math.round((i / allListingLinks.length) * 100),
+          statusMessage: `Checking business ${i + 1} of ${allListingLinks.length}...`
+        });
 
-        if (!isRealBusiness(result.name, result.category)) {
-          console.log(`✗ Not a business: ${result.name}`);
-          continue;
-        }
+        if (result.hasWebsite || !result.name || result.name.length < 2) continue;
+        if (!isRealBusiness(result.name, result.category)) continue;
 
         const lead = {
           id: bizId,
@@ -299,53 +423,45 @@ async function runScrape(niche, city, limit, scanId, mode) {
           city,
           hasWebsite: false,
           gmapsUrl: link,
+          status: 'new',
           foundAt: new Date().toISOString(),
         };
 
         leads.push(lead);
-        await saveLead(lead).catch(() => {});
-        console.log(`✓ ${result.name} (${leads.length}/${limit === 99999 ? '∞' : limit})`);
+        await saveLead(lead);
+        console.log(`✓ ${result.name} (${leads.length}/${limit})`);
 
-        if (activeScans[scanId]) {
-          activeScans[scanId].leads = [...leads];
-          activeScans[scanId].totalFound = leads.length;
-          activeScans[scanId].totalScanned = totalScanned;
-          activeScans[scanId].progress = 15 + Math.round((i / listingLinks.length) * 85);
-        }
+        updateScan({
+          leads: [...leads],
+          totalFound: leads.length,
+          statusMessage: `Found ${leads.length} lead${leads.length !== 1 ? 's' : ''} so far...`
+        });
 
       } catch (err) {
         console.error(`Listing error: ${err.message}`);
       }
     }
 
-    await browser.close();
+    await browser.close().catch(() => {});
 
-    if (activeScans[scanId]) {
-      activeScans[scanId].status = 'done';
-      activeScans[scanId].progress = 100;
-      activeScans[scanId].leads = leads;
-      activeScans[scanId].totalFound = leads.length;
-      activeScans[scanId].totalScanned = totalScanned;
-      activeScans[scanId].completedAt = new Date().toISOString();
-    }
+    updateScan({
+      status: 'done',
+      progress: 100,
+      leads,
+      totalFound: leads.length,
+      totalScanned,
+      statusMessage: `Done! Found ${leads.length} lead${leads.length !== 1 ? 's' : ''}.`,
+      completedAt: new Date().toISOString()
+    });
 
-    return { success: true, leads, totalFound: leads.length, totalScanned, totalSeen: await getSeenCount() };
+    console.log(`Scan complete: ${leads.length} leads from ${totalScanned} checked`);
 
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
-    if (activeScans[scanId]) {
-      activeScans[scanId].status = 'error';
-      activeScans[scanId].error = err.message;
-    }
+    updateScan({ status: 'error', error: err.message });
     throw err;
   }
 }
-
-app.post('/api/clear-history', async (req, res) => {
-  await pool.query('DELETE FROM seen_businesses').catch(() => {});
-  await pool.query('DELETE FROM leads').catch(() => {});
-  res.json({ success: true });
-});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`LeadHunter API running on port ${PORT}`));
